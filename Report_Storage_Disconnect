@@ -1,0 +1,103 @@
+#Script per verificare eventuali disconnessioni dello storage. Viene analizzato il vmkernel log e se trova la dicitura "STATE IN DOUBT" 
+#procede con il salvataggio del log e l'invio della mail
+#Nicolas Martinelli
+
+#Variabili VCenter
+$VcenterTest = "Test vCenter"
+$VcenterClienti = "Production vCenter"
+$VcenterInterni = "Internal vCenter"
+
+#Variabili connessione
+$User = 'DOMAIN\USER'
+$pswdFile = 'D:\TEMP\vmware\DisconnessioniStorage\Store\pass.sec'
+$keyFile = "D:\TEMP\vmware\DisconnessioniStorage\Store\chiave.key"
+$encryptedPswd = Get-Content -Path $pswdFile | ConvertTo-SecureString -Key (Get-Content -Path $keyFile)
+$cred = New-Object System.Management.Automation.PSCredential($user,$encryptedPswd)
+
+#Variabili Path e File
+$OutputPath = "D:\TEMP\vmware\DisconnessioniStorage\WRK\"
+$ZipOutputFileName = "LogVmware.zip"
+$ZipOutput = $OutputPath + $ZipOutputFileName
+$ArchivePath = "D:\TEMP\vmware\DisconnessioniStorage\Archive\"
+$PathToArchive = "D:\TEMP\vmware\DisconnessioniStorage\WRK\*.zip"
+$ClearPath = "D:\TEMP\vmware\DisconnessioniStorage\WRK\*.*"
+
+#Connessione a tutti i vCenter
+connect-VIServer -Server $VcenterTest -Credential $cred
+connect-VIServer -Server $VcenterClienti -Credential $cred
+connect-VIServer -Server $VcenterInterni -Credential $cred
+
+$HostEsx = Get-VMHost| Select Name, @{N="Cluster";E={Get-Cluster -VMHost $_}}
+
+$ProblemCluster = @()
+
+#Variabili Data
+$Date = get-date
+$DateFormat = $Date.ToString("yyyy-MM-dd")
+
+$ZipoOutputOLD = $DateFormat + $ZipOutputFileName
+
+#Inizio processo
+foreach ($i in $hostEsx){
+	#Nome Esxi
+	$HostEsxName = $i.Name
+	$Cluster = $i.Cluster
+	#Variabili output Esx
+	$OutputLogFileName = $HostEsxName + ".txt"
+	$OutputFile = $OutputPath + $OutputLogFileName
+	#Acquisizione vmkernel
+	$VmkernelLog= (Get-Log -VMHost (Get-VMHost $HostEsxName ) vmkernel).Entries
+	#Verifica presenza disconnessioni
+	$CheckStateDoubt = $VmkernelLog | Select-String -Pattern "STATE IN DOUBT"
+	if ($CheckStateDoubt -eq $q){
+		Write-host "NESSUNA DISCONNESSIONE" -foreground "green"
+	}
+	else{
+		#Verifica se ci sono disconnessioni odierne
+		if ($CheckStateDoubt -match $DateFormat){
+			Write-host "RILEVATA DISCONNESSIONE su $HostEsxName nel cluster $Cluster"  -foreground "red"
+			$VmkernelLog | Out-file $OutputFile
+			$CheckStateDoubt		
+			$ProblemCluster += $Cluster 
+			$ProblemCluster += ";"
+			#Variabile Booleana per invio log
+			$boolean = 1
+		}
+		else {Write-host "RILEVATA DISCONNESSIONE GIORNI PASSATI" -foreground "yellow"}
+		#$CheckStateDoubt
+	}
+}
+
+#Preparazione output mail
+$Tmp = $ProblemCluster -split ";"
+$TotClusterImpact = $tmp | select -Unique
+
+#Chiusura connessioni aperte sui vCenter
+Disconnect-VIServer -Server * -Confirm:$false -Force
+
+#Compressione risultato
+Compress-Archive -Path $OutputPath -DestinationPath $ZipOutput
+
+#Invio mail solo se ho trovato una disconnessione
+if ($boolean -eq 1){
+
+	#####Generazione Mail#####
+	$Subject = "!!! "+ $DateFormat + " RILEVATE DISCONNESSIONI STORAGE INFRASTRUTTURA VMWARE !!!"
+
+	$body = "Buongiorno,`r`n"
+	$body += "`r`n"
+	$body += "in allegato i log delle disconnessioni rilevate oggi.`r`n"
+	$body += "`r`n"
+	$body += "I Cluster impattati sono:`r`n"
+	$body += "`r`n"
+	$body += "$TotClusterImpact `r`n"
+	$body += "`r`n"
+	$body += "Grazie mille!"
+
+	Send-MailMessage -from "SENDER_MAIL_ADDRESS" -to "RECIPIENT_ADDRESS" -Subject "!!! RILEVATE DISCONNESSIONI !!!" -Body $body -Attachment $ZipOutput -SmtpServer "MAIL_RELAY_ADDRESS"
+	
+}
+#Pulizia cartella di lavoro
+Rename-Item $ZipOutput $ZipoOutputOLD
+Move-Item -Path $PathToArchive -Destination $ArchivePath
+Remove-Item $ClearPath
